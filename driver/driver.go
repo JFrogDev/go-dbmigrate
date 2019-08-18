@@ -14,7 +14,7 @@ type Driver interface {
 	// Initialize is the first function to be called.
 	// Check the url string and open and verify any connection
 	// that has to be made.
-	Initialize(url string) error
+	Initialize(url string, initOptions ...func(*InitializeParams)) error
 
 	// Close is the last function to be called.
 	// Close any open connection here.
@@ -34,8 +34,19 @@ type Driver interface {
 	Version() (uint64, error)
 }
 
+type InitializeParams struct {
+	MongoSSlParams MongoSSlOptions
+}
+
+type MongoSSlOptions struct {
+	SSlMode        bool
+	ClientCertPath string
+	ClientKeyPath  string
+	CaFilePath     string
+}
+
 // New returns Driver and calls Initialize on it
-func New(url string) (Driver, error) {
+func New(url string, initOptions ...func(*InitializeParams)) (Driver, error) {
 	u, err := neturl.Parse(url)
 	if err != nil {
 		return nil, err
@@ -46,7 +57,7 @@ func New(url string) (Driver, error) {
 		return nil, fmt.Errorf("Driver '%s' not found.", u.Scheme)
 	}
 	verifyFilenameExtension(u.Scheme, d)
-	if err := d.Initialize(url); err != nil {
+	if err := d.Initialize(url, initOptions...); err != nil {
 		return nil, err
 	}
 
