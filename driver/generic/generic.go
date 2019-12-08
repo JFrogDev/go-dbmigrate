@@ -1,6 +1,7 @@
 package generic
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ type Driver struct {
 	methodsReceiver MethodsReceiver
 	migrator        gomethods.Migrator
 	url             string
+	isLocked        bool
 }
 
 var _ gomethods.GoMethodsDriver = (*Driver)(nil)
@@ -50,10 +52,11 @@ func (d *Driver) SetMethodsReceiver(r interface{}) error {
 }
 
 func init() {
-	driver.RegisterDriver("generic", &Driver{})
+	driver.RegisterDriver("generic", driver.NewDriverGenerator(
+		func() driver.Driver { return &Driver{} }))
 }
 
-func (driver *Driver) Initialize(url string) error {
+func (driver *Driver) Initialize(url string, initOptions ...func(driver.Driver)) error {
 	if driver.methodsReceiver == nil {
 		return UnregisteredMethodsReceiverError(DRIVER_NAME)
 	}
@@ -124,7 +127,60 @@ func (driver *Driver) Close() error {
 	return nil
 }
 
-func (driver *Driver) ensureVersionTableExists() error {
+// https://www.postgresql.org/docs/9.6/static/explicit-locking.html#ADVISORY-LOCKS
+func (p *Driver) Lock() error {
+	if p.isLocked {
+		return driver.ErrLocked
+	}
+
+	aid, err := driver.GenerateAdvisoryLockId("xraydb", "migrate-generic")
+	if err != nil {
+		return err
+	}
+
+	// This will wait indefinitely until the lock can be acquired.
+	query := `SELECT pg_advisory_lock($1)`
+	if _, err := p.db.ExecContext(context.Background(), query, aid); err != nil {
+		return fmt.Errorf("Generic try lock failed: %v", err)
+	}
+
+	p.isLocked = true
+	return nil
+}
+
+func (p *Driver) Unlock() error {
+	if !p.isLocked {
+		return nil
+	}
+
+	aid, err := driver.GenerateAdvisoryLockId("xraydb", "migrate-generic")
+	if err != nil {
+		return err
+	}
+
+	query := `SELECT pg_advisory_unlock($1)`
+	if _, err := p.db.ExecContext(context.Background(), query, aid); err != nil {
+		return fmt.Errorf("Generic try unlock failed: %v", err)
+	}
+	p.isLocked = false
+	return nil
+}
+
+func (driver *Driver) ensureVersionTableExists() (err error) {
+	if err := driver.Lock(); err != nil {
+		return err
+	}
+
+	defer func() {
+		if e := driver.Unlock(); e != nil {
+			if err == nil {
+				err = e
+			} else {
+				err = fmt.Errorf("Error1: %v, Error2: %v", err, e)
+			}
+		}
+	}()
+
 	if _, err := driver.db.Exec("CREATE TABLE IF NOT EXISTS " + tableName + " (version int not null primary key);"); err != nil {
 		return err
 	}
